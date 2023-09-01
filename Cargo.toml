@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 rusb = "0.9"
 byteorder = "1.4.3"
+thiserror = "1.0.40"

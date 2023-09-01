@@ -6,6 +6,7 @@ use std::io::BufReader;
 use std::io::Read;
 use std::time;
 use std::time::Duration;
+use thiserror::Error;
 
 const MAGIC: &[u8; 4] = b"DBI0";
 const VENDOR_ID: u16 = 0x057E;
@@ -28,6 +29,18 @@ fn main() {
     }
 }
 
+#[derive(Error, Debug)]
+enum DBIError {
+    #[error("rusb error: {0}")]
+    Rusb(#[from] rusb::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("parse error: {0}")]
+    Parse(#[from] std::num::ParseIntError),
+    #[error("utf8 errpr: {0}")]
+    Utf8(#[from] std::str::Utf8Error),
+}
+
 struct OpenedDevice {
     device: DeviceHandle<GlobalContext>,
     in_ep: u8,
@@ -35,15 +48,17 @@ struct OpenedDevice {
 }
 
 impl OpenedDevice {
-    fn read(&self, buf: &mut Vec<u8>) -> Result<usize, rusb::Error> {
+    fn read(&self) -> Result<Vec<u8>, DBIError> {
+        let mut buf: Vec<u8> = vec![0; 1024];
         self.device
-            .read_bulk(self.in_ep, buf, Duration::from_secs(10))
+            .read_bulk(self.in_ep, &mut buf, Duration::from_secs(10))?;
+        Ok(buf)
     }
 
-    fn write(&self, buf: &mut Vec<u8>) -> Result<usize, rusb::Error> {
-        self.device
-            .write_bulk(self.out_ep, buf, Duration::from_secs(10))
-    }
+    // fn write(&self, buf: &mut Vec<u8>) -> Result<usize, rusb::Error> {
+    //     self.device
+    //         .write_bulk(self.out_ep, buf, Duration::from_secs(10))
+    // }
 }
 
 // Define a function that opens a USB device by its vendor ID and product ID
@@ -77,8 +92,8 @@ fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
             // Open the device and return the handle
             return Ok(OpenedDevice {
                 device: device.open()?,
-                in_ep: in_ep,
-                out_ep: out_ep,
+                in_ep,
+                out_ep,
             });
         }
     }
@@ -87,25 +102,26 @@ fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
 }
 
 // Define a function that runs some functions based on received instructions
-fn run_functions(
-    opened_device: &OpenedDevice,
-    cmd: u32,
-    data_size: u32,
-) -> Result<(), rusb::Error> {
+fn run_functions(opened_device: &OpenedDevice, cmd: u32, data_size: u32) -> Result<(), DBIError> {
+    println!("run fuctions: {}", cmd);
     // Match the command with different cases
     match cmd {
-        CMD_ID_EXIT => Ok(process_exit_command()),
-        CMD_ID_FILE_RANGE => Ok(proccess_file_range_command(
-            &opened_device.device,
-            opened_device.out_ep,
-            opened_device.in_ep,
-            data_size as u32,
-        )),
-        CMD_ID_LIST => Ok(process_list_command(
-            &opened_device.device,
-            opened_device.out_ep,
-            opened_device.in_ep,
-        )),
+        CMD_ID_EXIT => {
+            process_exit_command();
+            Ok(())
+        }
+        CMD_ID_FILE_RANGE => {
+            proccess_file_range_command(&opened_device, data_size)?;
+            Ok(())
+        }
+        CMD_ID_LIST => {
+            process_list_command(
+                &opened_device.device,
+                opened_device.out_ep,
+                opened_device.in_ep,
+            )?;
+            Ok(())
+        }
         _ => {
             // Run some custom functions here
             println!("Running custom functions for command {}", cmd);
@@ -115,15 +131,22 @@ fn run_functions(
     }
 }
 
-fn connect_to_switch() -> Result<(), rusb::Error> {
+fn connect_to_switch() -> Result<(), DBIError> {
     let opened_device = open_device(VENDOR_ID, ID_PRODUCT)?;
 
-    // Create a buffer with enough capacity
-    let mut buf = vec![0; 1024];
     loop {
-        opened_device.read(&mut buf)?;
+        let buf = opened_device.read()?;
 
-        let cmd_id = LittleEndian::read_u32(&buf[8..10]);
+        println!("{:?}", buf.len());
+        if buf.len() < 16 {
+            return Err(DBIError::Rusb(rusb::Error::InvalidParam));
+        }
+
+        if !buf.starts_with(MAGIC) {
+            return Err(DBIError::Rusb(rusb::Error::InvalidParam));
+        }
+
+        let cmd_id = LittleEndian::read_u32(&buf[8..12]);
         let data_size = LittleEndian::read_u32(&buf[12..16]);
 
         match run_functions(&opened_device, cmd_id, data_size) {
@@ -145,12 +168,7 @@ fn process_exit_command() {
     println!("exit")
 }
 
-fn proccess_file_range_command(
-    device: &DeviceHandle<GlobalContext>,
-    out_ep: u8,
-    in_ep: u8,
-    data_size: u32,
-) {
+fn proccess_file_range_command(device: &OpenedDevice, data_size: u32) -> Result<(), DBIError> {
     let mut buffer: Vec<u8> = Vec::new();
     buffer.extend_from_slice(MAGIC);
     buffer.extend_from_slice(&CMD_TYPE_ACK.to_le_bytes());
@@ -158,23 +176,21 @@ fn proccess_file_range_command(
     buffer.extend_from_slice(&data_size.to_le_bytes());
 
     device
-        .write_bulk(out_ep, &buffer, time::Duration::from_secs(10))
-        .unwrap();
+        .device
+        .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(10))?;
 
     buffer.clear();
     // Read from the bulk endpoint with a 10 second timeout
-    let _n = device.read_bulk(in_ep, &mut buffer, time::Duration::from_secs(10));
+    let buf = device.read().unwrap();
 
-    let range_size = LittleEndian::read_u32(&buffer[..4]);
-    let range_offset = LittleEndian::read_u32(&buffer[4..12]);
-    let nsp_name_len = LittleEndian::read_u32(&buffer[12..16]);
-    let nsp_name = std::str::from_utf8(&buffer[16..]).unwrap();
+    let range_size = LittleEndian::read_u32(&buf[..4]);
+    let range_offset = LittleEndian::read_u32(&buf[4..12]);
+    let nsp_name_len = LittleEndian::read_u32(&buf[12..16]);
+    let nsp_name = std::str::from_utf8(&buf[16..])?;
     println!(
         "Range Size: {}, Range Offset: {}, Name len: {}, Name: {}",
         range_size, range_offset, nsp_name_len, nsp_name
     );
-
-    buffer.clear();
 
     buffer.extend_from_slice(MAGIC);
     buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
@@ -182,15 +198,15 @@ fn proccess_file_range_command(
     buffer.extend_from_slice(&data_size.to_le_bytes());
 
     device
-        .write_bulk(out_ep, &buffer, time::Duration::from_secs(10))
-        .unwrap();
+        .device
+        .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(10))?;
 
     buffer.clear();
-    let _n = device.read_bulk(in_ep, &mut buffer, time::Duration::from_secs(10));
-    let ack = LittleEndian::read_u32(&buffer[..4]);
-    let cmd_type = LittleEndian::read_u32(&buffer[4..8]);
-    let cmd_id = LittleEndian::read_u32(&buffer[8..12]);
-    let data_size = LittleEndian::read_u32(&buffer[12..16]);
+    let buf = device.read().unwrap();
+    let ack = LittleEndian::read_u32(&buf[..4]);
+    let cmd_type = LittleEndian::read_u32(&buf[4..8]);
+    let cmd_id = LittleEndian::read_u32(&buf[8..12]);
+    let data_size = LittleEndian::read_u32(&buf[12..16]);
 
     println!(
         "Cmd Type: {}, Command id: {}, Data size: {}",
@@ -198,8 +214,13 @@ fn proccess_file_range_command(
     );
     println!("{ack}");
 
+    let path = format!(
+        "/home/pavel/Games/Nintendo/Super Mario 3D All-Stars [NSP]/{}",
+        nsp_name
+    );
+
     // Open the file and create a buffered reader
-    let file = File::open("/home/pavel/Games/Nintendo/Super Mario 3D All-Stars [NSP]/Super Mario 3D All-Stars [010049900F546000][v0].nsp").unwrap();
+    let file = File::open(path)?;
     let mut reader: BufReader<File> = BufReader::new(file);
 
     // Create a buffer with the chunk size capacity
@@ -208,23 +229,26 @@ fn proccess_file_range_command(
     // Loop until the end of the file is reached
     loop {
         // Read a chunk of data from the file into the buffer
-        let n = reader.read(&mut buffer).unwrap();
+        let n = reader.read(&mut buffer)?;
 
         // Break the loop if no more data is read
         if n == 0 {
-            break;
+            break Ok(());
         }
 
         // Write the buffer to the device using write_bulk method with a 10 second timeout
         device
-            .write_bulk(out_ep, &buffer[..n], time::Duration::from_secs(10))
-            .unwrap();
+            .device
+            .write_bulk(device.out_ep, &buffer[..n], time::Duration::from_secs(10))?;
     }
 }
 
-fn process_list_command(device: &DeviceHandle<GlobalContext>, out_ep: u8, in_ep: u8) {
-    let entries =
-        fs::read_dir("/home/pavel/Games/Nintendo/Super Mario 3D All-Stars [NSP]").unwrap();
+fn process_list_command(
+    device: &DeviceHandle<GlobalContext>,
+    out_ep: u8,
+    in_ep: u8,
+) -> Result<(), DBIError> {
+    let entries = fs::read_dir("/home/pavel/Games/Nintendo/Super Mario 3D All-Stars [NSP]")?;
     let file_names: Vec<String> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
@@ -236,7 +260,7 @@ fn process_list_command(device: &DeviceHandle<GlobalContext>, out_ep: u8, in_ep:
         })
         .collect();
 
-    let mut buffer: Vec<u8> = Vec::new();
+    let mut buffer: Vec<u8> = vec![];
 
     buffer.extend_from_slice(MAGIC);
     buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
@@ -246,22 +270,20 @@ fn process_list_command(device: &DeviceHandle<GlobalContext>, out_ep: u8, in_ep:
 
     buffer.extend_from_slice(&(data_size as u32).to_le_bytes());
 
-    device
-        .write_bulk(out_ep, buffer.as_slice(), time::Duration::from_secs(10))
-        .unwrap();
+    device.write_bulk(out_ep, buffer.as_slice(), time::Duration::from_secs(10))?;
 
     buffer.clear();
 
+    let mut buf = vec![0; 1024];
+
     // Read from the bulk endpoint with a 10 second timeout
-    let _n = device
-        .read_bulk(in_ep, &mut buffer, time::Duration::from_secs(10))
-        .unwrap();
+    let _n = device.read_bulk(in_ep, &mut buf, time::Duration::from_secs(10))?;
 
     println!(
         "Cmd Type: {:?}, Command id: {:?}, Data size: {:?}",
-        LittleEndian::read_u16(&buffer[4..8]),
-        LittleEndian::read_u16(&buffer[8..12]),
-        LittleEndian::read_u16(&buffer[12..16])
+        LittleEndian::read_u16(&buf[4..8]),
+        LittleEndian::read_u16(&buf[8..12]),
+        LittleEndian::read_u16(&buf[12..16])
     );
 
     buffer.clear();
@@ -270,7 +292,6 @@ fn process_list_command(device: &DeviceHandle<GlobalContext>, out_ep: u8, in_ep:
         buffer.extend_from_slice(file_name.as_bytes());
         buffer.push(b'\n');
     }
-    device
-        .write_bulk(out_ep, buffer.as_slice(), time::Duration::from_secs(50))
-        .unwrap();
+    device.write_bulk(out_ep, buffer.as_slice(), time::Duration::from_secs(50))?;
+    Ok(())
 }
