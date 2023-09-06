@@ -159,10 +159,8 @@ fn run_functions(
             Ok(())
         }
         _ => {
-            // Run some custom functions here
-            println!("Running custom functions for command {}", cmd);
-            // Return Ok
-            Ok(())
+            println!("Uknow command type {}", cmd);
+            Err(DBIError::Rusb(rusb::Error::InvalidParam))
         }
     }
 }
@@ -259,11 +257,9 @@ fn proccess_file_range_command(
         cmd_type, cmd_id, data_size
     );
     println!("{ack}");
-    //let filen_name_with_space = nsp_name.replace("\0", " ");
 
     let file_path: String = path.to_owned() + "/" + nsp_name;
 
-    // Open the file and create a buffered reader
     let file = File::open(file_path)?;
     let mut reader: BufReader<File> = BufReader::new(file);
 
