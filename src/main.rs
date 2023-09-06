@@ -18,7 +18,6 @@ const CMD_ID_FILE_RANGE: u32 = 2;
 const CMD_ID_LIST: u32 = 3;
 const BUFFER_SEGMENT_DATA_SIZE: usize = 0x100000;
 
-//const CMD_TYPE_REQUEST: u16 = 0;
 const CMD_TYPE_RESPONSE: u32 = 1;
 const CMD_TYPE_ACK: u32 = 2;
 
@@ -68,10 +67,43 @@ impl OpenedDevice {
         Ok(buf)
     }
 
-    // fn write(&self, buf: &mut Vec<u8>) -> Result<usize, rusb::Error> {
-    //     self.device
-    //         .write_bulk(self.out_ep, buf, Duration::from_secs(10))
-    // }
+    fn write<A>(&self, arg_like: A) -> Result<usize, rusb::Error>
+    where
+        A: for<'a> Into<WriteArgs>,
+    {
+        let args = arg_like.into();
+        self.device
+            .write_bulk(self.out_ep, &args.buf, args.duration)
+    }
+}
+
+pub struct WriteArgs {
+    buf: Vec<u8>,
+    duration: Duration,
+}
+
+impl Default for WriteArgs {
+    fn default() -> Self {
+        WriteArgs {
+            buf: Vec::new(),
+            duration: Duration::from_secs(10),
+        }
+    }
+}
+
+impl From<Vec<u8>> for WriteArgs {
+    fn from(buf: Vec<u8>) -> Self {
+        WriteArgs {
+            buf,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<(Vec<u8>, Duration)> for WriteArgs {
+    fn from((buf, duration): (Vec<u8>, Duration)) -> Self {
+        WriteArgs { buf: buf, duration }
+    }
 }
 
 fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
@@ -123,10 +155,7 @@ fn run_functions(
             Ok(())
         }
         CMD_ID_LIST => {
-            process_list_command(
-                opened_device,
-                path,
-            )?;
+            process_list_command(opened_device, path)?;
             Ok(())
         }
         _ => {
@@ -182,9 +211,7 @@ fn process_exit_command(device: &OpenedDevice) -> Result<(), DBIError> {
     buffer.extend_from_slice(&CMD_ID_EXIT.to_le_bytes());
     buffer.extend_from_slice(&CMD_ID_EXIT.to_le_bytes());
 
-    device
-        .device
-        .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(10))?;
+    device.write(buffer)?;
     exit(1);
 }
 
@@ -199,12 +226,8 @@ fn proccess_file_range_command(
     buffer.extend_from_slice(&CMD_ID_FILE_RANGE.to_le_bytes());
     buffer.extend_from_slice(&data_size.to_le_bytes());
 
-    device
-        .device
-        .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(10))?;
+    device.write(buffer)?;
 
-    buffer.clear();
-    // Read from the bulk endpoint with a 10 second timeout
     let buf = device.read(data_size as usize)?;
 
     let range_size = LittleEndian::read_u32(&buf[..4]);
@@ -216,16 +239,15 @@ fn proccess_file_range_command(
         range_size, range_offset, nsp_name_len, nsp_name
     );
 
+    let mut buffer: Vec<u8> = Vec::new();
+
     buffer.extend_from_slice(MAGIC);
     buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
     buffer.extend_from_slice(&CMD_ID_FILE_RANGE.to_le_bytes());
     buffer.extend_from_slice(&range_size.to_le_bytes());
 
-    device
-        .device
-        .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(10))?;
+    device.write(buffer)?;
 
-    buffer.clear();
     let buf = device.read(16)?;
     let ack = LittleEndian::read_u32(&buf[..4]);
     let cmd_type = LittleEndian::read_u32(&buf[4..8]);
@@ -238,7 +260,6 @@ fn proccess_file_range_command(
     );
     println!("{ack}");
     //let filen_name_with_space = nsp_name.replace("\0", " ");
-
 
     let file_path: String = path.to_owned() + "/" + nsp_name;
 
@@ -260,20 +281,14 @@ fn proccess_file_range_command(
 
         reader.read(&mut buffer)?;
 
-        device
-            .device
-            .write_bulk(device.out_ep, &buffer, time::Duration::from_secs(0))?;
-
+        device.write((buffer, time::Duration::from_secs(0)))?;
         curr_off += read_size;
     }
 
     Ok(())
 }
 
-fn process_list_command(
-    device: &OpenedDevice,
-    path: &String,
-) -> Result<(), DBIError> {
+fn process_list_command(device: &OpenedDevice, path: &String) -> Result<(), DBIError> {
     let entries = fs::read_dir(path)?;
     let file_names: Vec<String> = entries
         .filter_map(|entry| {
@@ -296,11 +311,7 @@ fn process_list_command(
 
     buffer.extend_from_slice(&(data_size as u32).to_le_bytes());
 
-
-    device.device.write_bulk(device.out_ep, buffer.as_slice(), time::Duration::from_secs(10))?;
-
-    buffer.clear();
-
+    device.write(buffer)?;
 
     let buf = device.read(16)?;
 
@@ -311,12 +322,14 @@ fn process_list_command(
         LittleEndian::read_u16(&buf[12..16])
     );
 
-    buffer.clear();
+    let mut buffer: Vec<u8> = vec![];
 
     for file_name in &file_names {
         buffer.extend_from_slice(file_name.as_bytes());
         buffer.push(b'\n');
     }
-    device.device.write_bulk(device.out_ep, buffer.as_slice(), time::Duration::from_secs(50))?;
+
+    device.write((buffer, time::Duration::from_secs(50)))?;
+
     Ok(())
 }
