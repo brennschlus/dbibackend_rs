@@ -5,6 +5,7 @@ use std::fs;
 
 use std::io::Read;
 use std::io::{BufReader, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::process::exit;
 use std::time;
 use std::time::Duration;
@@ -258,9 +259,12 @@ fn proccess_file_range_command(
     );
     println!("{ack}");
 
-    let file_path: String = path.to_owned() + "/" + nsp_name;
 
-    let file = File::open(file_path)?;
+    let mut full_path = PathBuf::from(path);
+    full_path.push(nsp_name);
+
+
+    let file = File::open(full_path)?;
     let mut reader: BufReader<File> = BufReader::new(file);
 
     reader.seek(SeekFrom::Start(range_offset))?;
@@ -277,7 +281,7 @@ fn proccess_file_range_command(
 
         reader.read(&mut buffer)?;
 
-        device.write((buffer, time::Duration::from_secs(0)))?;
+        device.write(buffer)?;
         curr_off += read_size;
     }
 
