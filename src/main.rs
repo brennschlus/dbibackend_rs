@@ -130,8 +130,14 @@ fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
                 }
             }
 
+
+            let mut open_device = device.open()?;
+
+            open_device.detach_kernel_driver(setting.interface_number())?;
+            open_device.claim_interface(setting.interface_number())?;
+
             return Ok(OpenedDevice {
-                device: device.open()?,
+                device: open_device,
                 in_ep,
                 out_ep,
             });
