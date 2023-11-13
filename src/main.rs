@@ -7,7 +7,6 @@ use std::io::Read;
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::exit;
-use std::time;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -87,7 +86,7 @@ impl Default for WriteArgs {
     fn default() -> Self {
         WriteArgs {
             buf: Vec::new(),
-            duration: Duration::from_secs(10),
+            duration: Duration::ZERO,
         }
     }
 }
@@ -103,7 +102,7 @@ impl From<Vec<u8>> for WriteArgs {
 
 impl From<(Vec<u8>, Duration)> for WriteArgs {
     fn from((buf, duration): (Vec<u8>, Duration)) -> Self {
-        WriteArgs { buf: buf, duration }
+        WriteArgs { buf, duration }
     }
 }
 
@@ -130,11 +129,17 @@ fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
                 }
             }
 
-
+            #[cfg(target_os = "macos")]
             let mut open_device = device.open()?;
 
-            open_device.detach_kernel_driver(setting.interface_number())?;
-            open_device.claim_interface(setting.interface_number())?;
+            #[cfg(not(target_os = "macos"))]
+            let open_device = device.open()?;
+
+            #[cfg(target_os = "macos")]
+            {
+                open_device.detach_kernel_driver(setting.interface_number())?;
+                open_device.claim_interface(setting.interface_number())?;
+            }
 
             return Ok(OpenedDevice {
                 device: open_device,
@@ -265,10 +270,8 @@ fn proccess_file_range_command(
     );
     println!("{ack}");
 
-
     let mut full_path = PathBuf::from(path);
     full_path.push(nsp_name);
-
 
     let file = File::open(full_path)?;
     let mut reader: BufReader<File> = BufReader::new(file);
@@ -285,7 +288,7 @@ fn proccess_file_range_command(
 
         let mut buffer: Vec<u8> = vec![0; read_size as usize];
 
-        reader.read(&mut buffer)?;
+        reader.read_exact(&mut buffer)?;
 
         device.write(buffer)?;
         curr_off += read_size;
@@ -335,7 +338,7 @@ fn process_list_command(device: &OpenedDevice, path: &String) -> Result<(), DBIE
         buffer.push(b'\n');
     }
 
-    device.write((buffer, time::Duration::from_secs(50)))?;
+    device.write(buffer)?;
 
     Ok(())
 }
