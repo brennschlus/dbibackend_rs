@@ -67,42 +67,8 @@ impl OpenedDevice {
         Ok(buf)
     }
 
-    fn write<A>(&self, arg_like: A) -> Result<usize, rusb::Error>
-    where
-        A: for<'a> Into<WriteArgs>,
-    {
-        let args = arg_like.into();
-        self.device
-            .write_bulk(self.out_ep, &args.buf, args.duration)
-    }
-}
-
-pub struct WriteArgs {
-    buf: Vec<u8>,
-    duration: Duration,
-}
-
-impl Default for WriteArgs {
-    fn default() -> Self {
-        WriteArgs {
-            buf: Vec::new(),
-            duration: Duration::ZERO,
-        }
-    }
-}
-
-impl From<Vec<u8>> for WriteArgs {
-    fn from(buf: Vec<u8>) -> Self {
-        WriteArgs {
-            buf,
-            ..Self::default()
-        }
-    }
-}
-
-impl From<(Vec<u8>, Duration)> for WriteArgs {
-    fn from((buf, duration): (Vec<u8>, Duration)) -> Self {
-        WriteArgs { buf, duration }
+    fn write(&self, buf: Vec<u8>) -> Result<usize, rusb::Error> {
+        self.device.write_bulk(self.out_ep, &buf, Duration::ZERO)
     }
 }
 
