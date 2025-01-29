@@ -1,43 +1,25 @@
 use crate::fs::File;
 use byteorder::{ByteOrder, LittleEndian};
 use rusb::{DeviceHandle, GlobalContext};
+use std::array::TryFromSliceError;
 use std::fs;
 
-use std::io::Read;
-use std::io::{BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Duration;
 use thiserror::Error;
 
-const MAGIC: &[u8; 4] = b"DBI0";
 const VENDOR_ID: u16 = 0x057E;
 const ID_PRODUCT: u16 = 0x3000;
-const CMD_ID_EXIT: u32 = 0;
-const CMD_ID_FILE_RANGE: u32 = 2;
-const CMD_ID_LIST: u32 = 3;
-const BUFFER_SEGMENT_DATA_SIZE: usize = 0x100000;
+const BUFFER_SEGMENT_DATA_SIZE: u32 = 0x100000;
 
-const CMD_TYPE_RESPONSE: u32 = 1;
-const CMD_TYPE_ACK: u32 = 2;
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() < 2 {
-        println!("Execpted folder path");
-        exit(0);
-    }
-
-    let path: &String = &args[1];
-
-    let switch_connection = connect_to_switch(path);
-
-    match switch_connection {
-        Ok(_) => println!("fine"),
-        Err(e) => println!("error: {:?}", e),
-    }
-}
+const MAGIC: [u8; 4] = *b"DBI0";
+const CMD_ID_EXIT: [u8; 4] = 0u32.to_le_bytes(); // 0 to LittleEndian
+const CMD_TYPE_RESPONSE: [u8; 4] = 1u32.to_le_bytes(); // 1 to LittleEndian
+const CMD_ID_FILE_RANGE: [u8; 4] = 2u32.to_le_bytes(); // 2 to LittleEndian
+const CMD_TYPE_ACK: [u8; 4] = 2u32.to_le_bytes(); // 2 to LittleEndian
+const CMD_ID_LIST: [u8; 4] = 3u32.to_le_bytes(); // 3 to LittleEndian
 
 #[derive(Error, Debug)]
 enum DBIError {
@@ -47,10 +29,32 @@ enum DBIError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] std::num::ParseIntError),
-    #[error("utf8 errpr: {0}")]
+    #[error("utf8 error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
+    #[error("try into error: {0})")]
+    TryFromSlice(#[from] TryFromSliceError),
     #[error("wrong header. expected {:?}, found: {:?}", expected, found)]
     WrongHeader { expected: [u8; 4], found: [u8; 4] },
+}
+
+fn main() -> Result<(), DBIError> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() < 2 {
+        eprintln!("Excepted folder path");
+        exit(0);
+    }
+
+    let path: &String = &args[1];
+    let path = PathBuf::from(path).canonicalize()?;
+
+    let switch_connection = connect_to_switch(&path);
+
+    match switch_connection {
+        Ok(_) => println!("fine"),
+        Err(e) => eprintln!("error: {:?}", e),
+    };
+    Ok(())
 }
 
 struct OpenedDevice {
@@ -119,9 +123,9 @@ fn open_device(vid: u16, pid: u16) -> Result<OpenedDevice, rusb::Error> {
 
 fn run_functions(
     opened_device: &OpenedDevice,
-    cmd: u32,
+    cmd: [u8; 4],
     data_size: u32,
-    path: &String,
+    path: &PathBuf,
 ) -> Result<(), DBIError> {
     match cmd {
         CMD_ID_EXIT => {
@@ -137,13 +141,13 @@ fn run_functions(
             Ok(())
         }
         _ => {
-            println!("Uknow command type {}", cmd);
+            println!("Unknown command type {:?}", cmd);
             Err(DBIError::Rusb(rusb::Error::InvalidParam))
         }
     }
 }
 
-fn connect_to_switch(path: &String) -> Result<(), DBIError> {
+fn connect_to_switch(path: &PathBuf) -> Result<(), DBIError> {
     let opened_device = open_device(VENDOR_ID, ID_PRODUCT)?;
 
     loop {
@@ -153,13 +157,10 @@ fn connect_to_switch(path: &String) -> Result<(), DBIError> {
             return Err(DBIError::Rusb(rusb::Error::InvalidParam));
         }
 
-        if !buf.starts_with(MAGIC) {
-            let found: [u8; 4] = buf[..4].try_into().ok().ok_or(DBIError::WrongHeader {
-                expected: *MAGIC,
-                found: [0; 4],
-            })?;
+        if !buf.starts_with(&MAGIC) {
+            let found: [u8; 4] = buf[..4].try_into()?;
             return Err(DBIError::WrongHeader {
-                expected: *MAGIC,
+                expected: MAGIC,
                 found,
             });
         }
@@ -167,7 +168,7 @@ fn connect_to_switch(path: &String) -> Result<(), DBIError> {
         let cmd_id = LittleEndian::read_u32(&buf[8..12]);
         let data_size = LittleEndian::read_u32(&buf[12..16]);
 
-        match run_functions(&opened_device, cmd_id, data_size, path) {
+        match run_functions(&opened_device, cmd_id.to_le_bytes(), data_size, path) {
             Ok(_) => {
                 println!("Functions run successfully for command {}", cmd_id);
                 continue;
@@ -181,11 +182,7 @@ fn connect_to_switch(path: &String) -> Result<(), DBIError> {
 }
 
 fn process_exit_command(device: &OpenedDevice) -> Result<(), DBIError> {
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
-    buffer.extend_from_slice(&CMD_ID_EXIT.to_le_bytes());
-    buffer.extend_from_slice(&CMD_ID_EXIT.to_le_bytes());
+    let buffer: Vec<u8> = [MAGIC, CMD_TYPE_RESPONSE, CMD_ID_EXIT, CMD_ID_EXIT].concat();
 
     device.write(buffer)?;
     exit(1);
@@ -194,13 +191,9 @@ fn process_exit_command(device: &OpenedDevice) -> Result<(), DBIError> {
 fn proccess_file_range_command(
     device: &OpenedDevice,
     data_size: u32,
-    path: &String,
+    path: &PathBuf,
 ) -> Result<(), DBIError> {
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&CMD_TYPE_ACK.to_le_bytes());
-    buffer.extend_from_slice(&CMD_ID_FILE_RANGE.to_le_bytes());
-    buffer.extend_from_slice(&data_size.to_le_bytes());
+    let buffer: Vec<u8> = [MAGIC, CMD_TYPE_ACK, CMD_ID_FILE_RANGE].concat();
 
     device.write(buffer)?;
 
@@ -215,12 +208,13 @@ fn proccess_file_range_command(
         range_size, range_offset, nsp_name_len, nsp_name
     );
 
-    let mut buffer: Vec<u8> = Vec::new();
-
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
-    buffer.extend_from_slice(&CMD_ID_FILE_RANGE.to_le_bytes());
-    buffer.extend_from_slice(&range_size.to_le_bytes());
+    let buffer: Vec<u8> = [
+        MAGIC,
+        CMD_TYPE_RESPONSE,
+        CMD_ID_FILE_RANGE,
+        range_size.to_le_bytes(),
+    ]
+    .concat();
 
     device.write(buffer)?;
 
@@ -245,7 +239,7 @@ fn proccess_file_range_command(
     reader.seek(SeekFrom::Start(range_offset))?;
     let mut curr_off: u32 = 0x0;
     let end_off = range_size;
-    let mut read_size: u32 = BUFFER_SEGMENT_DATA_SIZE as u32;
+    let mut read_size: u32 = BUFFER_SEGMENT_DATA_SIZE;
 
     while curr_off < end_off {
         if curr_off + read_size >= end_off {
@@ -263,7 +257,7 @@ fn proccess_file_range_command(
     Ok(())
 }
 
-fn process_list_command(device: &OpenedDevice, path: &String) -> Result<(), DBIError> {
+fn process_list_command(device: &OpenedDevice, path: &PathBuf) -> Result<(), DBIError> {
     let entries = fs::read_dir(path)?;
     let file_names: Vec<String> = entries
         .filter_map(|entry| {
@@ -276,11 +270,7 @@ fn process_list_command(device: &OpenedDevice, path: &String) -> Result<(), DBIE
         })
         .collect();
 
-    let mut buffer: Vec<u8> = vec![];
-
-    buffer.extend_from_slice(MAGIC);
-    buffer.extend_from_slice(&CMD_TYPE_RESPONSE.to_le_bytes());
-    buffer.extend_from_slice(&CMD_ID_LIST.to_le_bytes());
+    let mut buffer: Vec<u8> = [MAGIC, CMD_TYPE_RESPONSE, CMD_ID_LIST].concat();
 
     let data_size = file_names.iter().map(|s| s.len() + 1).sum::<usize>();
 
