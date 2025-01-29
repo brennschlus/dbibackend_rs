@@ -48,13 +48,7 @@ fn main() -> Result<(), DBIError> {
     let path: &String = &args[1];
     let path = PathBuf::from(path).canonicalize()?;
 
-    let switch_connection = connect_to_switch(&path);
-
-    match switch_connection {
-        Ok(_) => println!("fine"),
-        Err(e) => eprintln!("error: {:?}", e),
-    };
-    Ok(())
+    connect_to_switch(&path)
 }
 
 struct OpenedDevice {
@@ -128,21 +122,12 @@ fn run_functions(
     path: &PathBuf,
 ) -> Result<(), DBIError> {
     match cmd {
-        CMD_ID_EXIT => {
-            process_exit_command(opened_device)?;
-            Ok(())
-        }
-        CMD_ID_FILE_RANGE => {
-            proccess_file_range_command(opened_device, data_size, path)?;
-            Ok(())
-        }
-        CMD_ID_LIST => {
-            process_list_command(opened_device, path)?;
-            Ok(())
-        }
+        CMD_ID_EXIT => process_exit_command(opened_device),
+        CMD_ID_FILE_RANGE => proccess_file_range_command(opened_device, data_size, path),
+        CMD_ID_LIST => process_list_command(opened_device, path),
         _ => {
             println!("Unknown command type {:?}", cmd);
-            Err(DBIError::Rusb(rusb::Error::InvalidParam))
+            Err(rusb::Error::InvalidParam.into())
         }
     }
 }
@@ -154,7 +139,7 @@ fn connect_to_switch(path: &PathBuf) -> Result<(), DBIError> {
         let buf = opened_device.read(16)?;
 
         if buf.len() < 16 {
-            return Err(DBIError::Rusb(rusb::Error::InvalidParam));
+            return Err(rusb::Error::InvalidParam.into());
         }
 
         if !buf.starts_with(&MAGIC) {
